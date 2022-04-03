@@ -23,7 +23,7 @@ import re
 import tempfile
 from collections import deque
 from pathlib import Path
-from typing import Any, Iterable, List, Optional, Tuple, TypedDict
+from typing import Any, Iterable, List, Optional, Tuple, TypedDict, Dict
 
 from .core import TextREPLDriver, Positioned, Document, Hypothesis, Goal, Message, Sentence, \
     Text, cwd
@@ -65,7 +65,7 @@ class Lean3(TextREPLDriver):
     # repeated dozens of times per query.
     USE_THREADING = False
     REPL_ARGS = ("--server", "-M 4096", "-T 100000") # Same defaults as vscode
-    CLI_ARGS = ("--ast", "-M 4096", "-T 100000")
+    CLI_ARGS = ("--ast", "--tsast", "--tspp", "-M 16384", "-T 100000")
 
     ID = "lean3_repl"
     LANGUAGE = "lean3"
@@ -79,6 +79,7 @@ class Lean3(TextREPLDriver):
         self.instance_args = () if self.USE_THREADING else ("--threads=0",)
         self.document = Document([], "")
         self.ast: AstData = []
+        self.states: Dict = dict()
         self.seq_num = -1
 
     def _wait(self, seq_num, wait_for_current_tasks=False):
@@ -154,9 +155,11 @@ class Lean3(TextREPLDriver):
 
     def _get_state_at(self, pos: Pos):
         # LATER: Render using Lean widgets
-        info, _ = self._query("info", line=pos[0], column=pos[1])
-        record = info.get("record", {})
-        return record.get("state")
+
+        return self.states.get(pos, dict()).get("pp", "")
+        #info, _ = self._query("info", line=pos[0], column=pos[1])
+        #record = info.get("record", {})
+        #return record.get("state")
 
     DEBUG = False
 
@@ -291,10 +294,21 @@ class Lean3(TextREPLDriver):
                 with open(fdescriptor, "w", encoding="utf-8") as tmp:
                     tmp.write(self.document.contents)
                 self.run_cli(more_args=[str(tmpname)])
-                self.ast = json.loads(tmpname.with_suffix(".ast.json").read_text("utf8"))["ast"]
+                data = json.loads(tmpname.with_suffix(".ast.json").read_text("utf8"))
+                self.ast = data["ast"]
             finally:
                 tmpname.unlink(missing_ok=True)
                 tmpname.with_suffix(".ast.json").unlink(missing_ok=True)
+
+        self.states = dict()
+        for tactic in data["tactics"]:
+            if not tactic["success"]: continue
+            if tactic["start"] == tactic["end"]: continue
+            if tactic["ast"] >= len(self.ast): continue
+            tac_ast = self.ast[tactic["ast"]]
+            if "end" not in tac_ast: continue
+            self.states[tuple(tac_ast["start"])] = data["states"][tactic["start"]]
+            self.states[tuple(tac_ast["end"])] = data["states"][tactic["end"]]
         with self as api:
             return api._annotate_doc()
 
